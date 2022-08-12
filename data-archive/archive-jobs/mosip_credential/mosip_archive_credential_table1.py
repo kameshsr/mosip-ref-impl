@@ -1,10 +1,10 @@
 #-- -------------------------------------------------------------------------------------------------
-#-- Job Name        : Audit DB Tables Archive
-#-- DB Name 	    : mosip_audit
-#-- Table Names     : app_audit_log
-#-- Purpose    	    : Job to Archive Data in Audit DB for above mentioned tables         
-#-- Create By       : Chandra Keshav Mishra
-#-- Created Date    : Sept-2021
+#-- Job Name        : Credential DB Tables Archive
+#-- DB Name 	    : mosip_archive
+#-- Table Names     : credential_transaction
+#-- Purpose    	    : Job to Archive Data in mosip_archive database for the tables mentioned in the script
+#-- Create By       : Kamesh Shekhar Prasad
+#-- Created Date    : Aug-2022
 #-- 
 #-- Modified Date        Modified By         Comments / Remarks
 #-- ------------------------------------------------------------------------------------------
@@ -18,6 +18,7 @@ import sys
 import configparser
 import psycopg2
 import datetime
+import json
 
 from configparser import ConfigParser
 from datetime import datetime
@@ -51,6 +52,36 @@ def escape(st):
     else:
         return st
 
+def convertStringToMap(credentialStatusTime):
+    credentialStatusTimeMap = {}
+    credentialStatusTimeList = credentialStatusTime.split(",")
+    for credentialStatusTime in credentialStatusTimeList:
+        credentialStatusTimeMap[credentialStatusTime.split(":")[0]] = credentialStatusTime.split(":")[1]
+    return credentialStatusTimeMap
+
+def convertStringToLiteralString(credentialEndStatusList):
+    print(credentialEndStatusList)
+    credentialEndStatus = credentialEndStatusList.split(",")
+    finalString = ""
+    for credentialEndStatus in credentialEndStatus:
+        finalString = finalString + "'" + credentialEndStatus + "',"
+    finalString = finalString[0:-1]
+    return finalString
+
+def moveRecords(query, sourceCur, aschemaName, tableName, archiveCur, archiveConn, sschemaName, sourseConn):
+    sourceCur.execute(query)
+    rows = sourceCur.fetchall()
+    select_count = sourceCur.rowcount
+    print(select_count, ": Record selected for archive from ", tableName)
+    for row in rows:
+        finalValues = getValues(row)
+        archiveCur.execute("INSERT INTO "+aschemaName+"."+tableName+" VALUES ("+finalValues+");")
+        archiveConn.commit()
+        print("Inserted into "+aschemaName+"."+tableName)
+        sourceCur.execute("DELETE FROM "+sschemaName+"."+tableName+" WHERE id ='"+row[0]+"'"+";")
+        sourseConn.commit()
+        print("Deleted from "+sschemaName+"."+tableName)
+
 def dataArchive():
     sourseConn = None
     archiveConn = None
@@ -77,28 +108,21 @@ def dataArchive():
         sschemaName = dbparam["source_schema_name"]
         aschemaName = dbparam["archive_schema_name"]
         oldDays = dbparam["archive_older_than_days"]
-        
+        credentialStatusTime = dbparam["credential.status.time.map"]
+        credentialEndStatusList= dbparam["credential.endstatus.list"]
+        credentialStatusTimeMap = convertStringToMap(credentialStatusTime)
         print(tableName)
-        select_query = "SELECT * FROM "+sschemaName+"."+tableName+" WHERE cr_dtimes < NOW() - INTERVAL '"+oldDays+" days'"
-        sourceCur.execute(select_query)
-        rows = sourceCur.fetchall()
-        select_count = sourceCur.rowcount
-        print(select_count, ": Record selected for archive from ", tableName)
-        if select_count > 0:
-            for row in rows:
-                rowValues = getValues(row)
-                insert_query = "INSERT INTO "+aschemaName+"."+tableName+" VALUES ("+rowValues+")"
-                archiveCur.execute(insert_query)
-                archiveConn.commit()
-                insert_count = archiveCur.rowcount
-                print(insert_count, ": Record inserted successfully ")
-                if insert_count > 0:
-                    delete_query = "DELETE FROM "+sschemaName+"."+tableName+" WHERE id ='"+row[0]+"'"
-                    sourceCur.execute(delete_query)
-                    sourseConn.commit()
-                    delete_count = sourceCur.rowcount
-                    print(delete_count, ": Record deleted successfully") 
-             
+
+        for(statusCode,statusTime) in credentialStatusTimeMap.items():
+            print(statusCode)
+            print(statusTime)
+            query = "SELECT * FROM "+sschemaName+"."+tableName+" WHERE status_code ='"+statusCode+"' and cr_dtimes < NOW() - INTERVAL '"+statusTime+" days';"
+            moveRecords(query, sourceCur, aschemaName, tableName, archiveCur, archiveConn, sschemaName, sourseConn)
+
+        credentialEndStatusListString = convertStringToLiteralString(credentialEndStatusList)
+        select_query = "SELECT * FROM "+sschemaName+"."+tableName+" WHERE status_code in("+credentialEndStatusListString+")"
+        moveRecords(select_query, sourceCur, aschemaName, tableName, archiveCur, archiveConn, sschemaName, sourseConn)
+
     except (Exception, psycopg2.DatabaseError) as error:
         print(error)
     finally:
